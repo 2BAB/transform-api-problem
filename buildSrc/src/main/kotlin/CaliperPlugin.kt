@@ -4,10 +4,12 @@ import com.android.build.api.variant.ApplicationAndroidComponentsExtension
 import com.android.build.gradle.AppPlugin
 import com.android.build.gradle.internal.coverage.JacocoReportTask.JacocoReportWorkerAction.Companion.logger
 import com.android.build.gradle.internal.tasks.DexMergingTask
+import com.android.build.gradle.internal.tasks.MergeJavaResourceTask
 import com.android.build.gradle.tasks.TransformClassesWithAsmTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.attributes.Attribute
+import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.tasks.*
 import org.gradle.configurationcache.extensions.capitalized
@@ -54,49 +56,6 @@ abstract class CaliperPlugin : Plugin<Project> {
                     }
 
                 val aggregationJson = project.layout.buildDirectory.file("caliper-aggregation.json")
-                project.afterEvaluate { // to locate the "pre${capVariantName}Build" task we have to wait the evaluation ends
-                    val javaResMergeTaskProvider = project.tasks
-                        .getByName("merge${capVariantName}JavaResource")
-                    javaResMergeTaskProvider.doLast {
-                        variantCaliperConfiguration.incoming
-                            .artifacts
-                            .artifactFiles
-                            .files
-                            .forEach {
-                                logger.lifecycle("$name - ${it.absolutePath}")
-                                val jar = JarFile(it.absolutePath)
-                                jar.entries().asSequence().first {
-                                    it.name == "aggregation.json"
-                                }.apply {
-                                    // just pick up the latest one as it's just a demo
-                                    aggregationJson.get()
-                                        .asFile
-                                        .writeBytes(jar.getInputStream(this).readBytes())
-                                }
-                            }
-                    }
-                }
-
-                // The legacy way is an AGP task running right after the Kotlin/Java compilation,
-                // here is just a mock up since the API is gone.
-                project.afterEvaluate {
-                    val legacyTransform =
-                        project.tasks.register("mockup${capVariantName}ByteCodeTransform") {
-                            inputs.file(aggregationJson)
-                            dependsOn("compile${capVariantName}Kotlin")
-                            dependsOn("merge${capVariantName}JavaResource")
-                            doLast {
-                                aggregationJson.get().asFile.let {
-                                    logger.lifecycle("mockup transform with param: ${it.name}")
-                                    //!! THE MOST IMPORTANT THING IS WE WANT TO PASS AN AGGREGATION FILE INTO THE TRANSFORMER.!!
-                                    logger.lifecycle(it.readText())
-                                    //... main logic are omitted
-                                }
-                            }
-                        }
-                    project.tasks.named("assemble${capVariantName}")
-                        .configure { dependsOn(legacyTransform) }
-                }
 
                 // The new way: comment out below code snippet to see the exception
                 appVariant.instrumentation
@@ -105,6 +64,7 @@ abstract class CaliperPlugin : Plugin<Project> {
                         InstrumentationScope.ALL
                     ) {
                         it.configJson.set(aggregationJson)
+                        it.variantCaliperConfiguration.from(variantCaliperConfiguration)
                     }
                 appVariant.instrumentation
                     .setAsmFramesComputationMode(FramesComputationMode.COPY_FRAMES)
@@ -131,6 +91,9 @@ abstract class CaliperPlugin : Plugin<Project> {
         @get:InputFile
         @get:PathSensitive(PathSensitivity.RELATIVE)
         val configJson: RegularFileProperty
+
+        @get:Classpath
+        val variantCaliperConfiguration: ConfigurableFileCollection
     }
 
     abstract class CaliperClassVisitorFactory :
@@ -140,7 +103,20 @@ abstract class CaliperPlugin : Plugin<Project> {
             classContext: ClassContext,
             nextClassVisitor: ClassVisitor
         ): ClassVisitor {
-            parameters.get().configJson.get().asFile.let {
+            val configJson = parameters.get().configJson.get().asFile
+
+            parameters.get().variantCaliperConfiguration.forEach {
+                logger.lifecycle(" - ${it.absolutePath}")
+                val jar = JarFile(it)
+                jar.entries().asSequence().first {
+                    it.name == "aggregation.json"
+                }.apply {
+                    // just pick up the latest one as it's just a demo
+                    configJson.writeBytes(jar.getInputStream(this).readBytes())
+                }
+            }
+
+            configJson.let {
                 //!! THE MOST IMPORTANT THING IS WE WANT TO PASS AN AGGREGATION FILE INTO THE TRANSFORMER.!!
                 logger.lifecycle(it.readText())
             }
